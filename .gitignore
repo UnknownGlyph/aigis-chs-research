@@ -1,0 +1,14 @@
+# Python cache & temp files
+__pycache__/
+*.py[cod]
+*.tmp
+*.downloading
+
+# Local game binary backups & raw extracted game tables (do not distribute proprietary game binaries)
+backup/
+extracted/
+
+# Locally built binary patch files (built locally via `python patcher.py build`)
+# Keep patch_out/font_preview.png for README documentation
+patch_out/*
+!patch_out/font_preview.png
