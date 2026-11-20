@@ -10,7 +10,7 @@
 
 ## 一、项目概览与全量汉化覆盖率
 
-本项目针对《千年战争 Aigis》（千年戦争アイギス）DMM Windows 客户端（`aigis_exe`，Aqualead 引擎），实现了从 **`ALL4` / `ALTB` / `ALRD` / `ALFT` / `ALIG` / `ALAR v3` 二进制格式无损编解码**、**粗宋体（华文中宋）位图字库动态重构** 到 **本地部署腾讯混元 `Hy-MT2-1.8B` GPU 批量翻译** 的完整工具链。
+本项目针对《千年战争 Aigis》（千年戦争アイギス）DMM Windows 客户端（`aigis_exe`，Aqualead 引擎），实现了从 **`ALL4` / `ALTB` / `ALRD` / `ALFT` / `ALIG` / `ALAR v3` 二进制格式无损编解码**、**粗宋体（华文中宋）位图字库动态重构** 到 **本地部署腾讯混元 `Hy-MT2-1.8B` GPU 批量翻译(除剧情外的主要翻译由Gemini4 Neon完成)** 的完整工具链。
 
 ### 字库实际渲染预览（`MainFont.aft` 28×28 4bpp PAL4 位图字库）
 
