@@ -6,6 +6,7 @@ __pycache__/
 
 # Local game binary backups & raw extracted game tables (do not distribute proprietary game binaries)
 backup/
+backup_retranslate/
 extracted/
 
 # Locally built binary patch files (built locally via `python patcher.py build`)

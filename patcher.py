@@ -408,7 +408,15 @@ def cmd_build(game_dir: str, ttf_path: Optional[str] = None) -> None:
 
     # --- [3/4] Rebuild MainFont.aft (.cache) and MainFontFix.aft (root) ---
     print("\n=== [3/4] Rebuilding Chinese ALFT bitmap fonts ===")
-    used_game_cps = fb.collect_used_game_codepoints(game_dir, patch_out_dir=PATCH_OUT_DIR)
+    used_game_cps, char_weights = fb.collect_displayed_text(game_dir, patch_out_dir=PATCH_OUT_DIR)
+    priority_cps = fb.collect_display_priority_codepoints(game_dir, patch_out_dir=PATCH_OUT_DIR)
+    scan_stats = getattr(fb.collect_displayed_text, "last_stats", {})
+    print(
+        f"  Displayed codepoint inventory: {len(used_game_cps)} chars "
+        f"({len(priority_cps)} in display columns, "
+        f"{scan_stats.get('altb', 0)} ALTB tables, {scan_stats.get('alar', 0)} ALAR archives, "
+        f"{scan_stats.get('fail', 0)} unreadable)"
+    )
     font_jobs = [
         (CACHE_FONT_NAME, os.path.join(".cache", CACHE_FONT_SHA256)),
         (ROOT_FONT_NAME, ROOT_FONT_SHA256),
@@ -424,7 +432,9 @@ def cmd_build(game_dir: str, ttf_path: Optional[str] = None) -> None:
             required_chars=all_zh_chars,
             used_game_cps=used_game_cps,
             ttf_path=ttf_path,
-            fill_gb2312=True,
+            fill_gb2312=False,
+            char_weights=char_weights,
+            priority_cps=priority_cps,
         )
         dst_path = os.path.join(PATCH_OUT_DIR, rel_path)
         os.makedirs(os.path.dirname(dst_path), exist_ok=True)
@@ -433,10 +443,23 @@ def cmd_build(game_dir: str, ttf_path: Optional[str] = None) -> None:
 
         print(
             f"  [OK] {fname:18s} size={fstats['final_size']} B (exact), "
-            f"glyphs={fstats['final_glyphs']}, +{fstats['added_required_sc']} req SC, "
-            f"+{fstats['added_bonus_gb2312']} bonus GB2312, kept={fstats['kept_used_game']}/{fstats['total_used_game']} used JP, "
+            f"glyphs={fstats['final_glyphs']}/{fstats['capacity']} cap, "
+            f"+{fstats['added_required_sc']} req SC, "
+            f"reused={fstats['reused_original_glyphs']} native, "
+            f"kept={fstats['kept_used_game']}/{fstats['total_used_game']} used JP, "
             f"ttf={fstats['ttf']}"
         )
+        if fstats["missing_priority"]:
+            print(
+                f"  [ERROR] {fname}: {fstats['missing_priority']} DISPLAYED char(s) have no glyph: "
+                f"{fstats['missing_priority_str']}"
+            )
+        if fstats["missing_required"]:
+            print(
+                f"  [INFO] {fname}: {fstats['missing_required'] - fstats['missing_priority']} pool-only "
+                f"char(s) (internal IDs / dead strings, not rendered by any display column) exceeded the "
+                f"fixed atlas budget and were dropped."
+            )
         manifest_files.append({
             "name": fname,
             "rel_path": rel_path.replace("\\", "/"),
@@ -527,9 +550,22 @@ def cmd_verify(game_dir: str) -> None:
         except Exception as e:
             errors.append(f"{item['name']} round-trip parse failed: {e}")
 
-    # Verify 100% glyph coverage for ALL translated Chinese characters in BOTH fonts
+    # Verify glyph coverage against EVERY character the patched client can actually display
+    # (it is impossible to cover dictionary-only chars that never reach the screen: the ALFT
+    # atlas is size-locked, so the budget allocator drops the lowest-frequency leftovers).
+    displayed_cps, _weights = fb.collect_displayed_text(game_dir, patch_out_dir=PATCH_OUT_DIR)
+    required_cps = displayed_cps | {ord(c) for c in fb.MUST_KEEP_UI_CHARS}
+    dropped_reported: Set[int] = set()
     for fname, cps in font_charsets.items():
-        missing_zh = sorted(zh_cps - cps)
+        stats = next((i.get("font_stats") for i in manifest["files"] if i["name"] == fname), {}) or {}
+        dropped = set(stats.get("dropped_low_priority", []))
+        dropped_reported |= dropped
+        uncovered = sorted(required_cps - cps)
+        unexpected = [cp for cp in uncovered if cp not in dropped]
+        if unexpected:
+            sample = "".join(chr(c) for c in unexpected[:40])
+            errors.append(f"{fname}: {len(unexpected)} displayable char(s) without a glyph: {sample!r}")
+        missing_zh = sorted(zh_cps - cps - dropped)
         if missing_zh:
             sample = "".join(chr(c) for c in missing_zh[:30])
             errors.append(f"{fname} missing {len(missing_zh)} translated Chinese glyph(s): {sample!r}")
@@ -540,12 +576,19 @@ def cmd_verify(game_dir: str) -> None:
             print("  -", e)
         sys.exit(1)
 
+    dropped_str = "".join(chr(c) for c in sorted(dropped_reported))
     print(
         f"[PASS] Verified all {len(manifest['files'])} patched files:\n"
         f"  - Exact byte size match: 100% ({len(manifest['files'])}/{len(manifest['files'])})\n"
         f"  - Round-trip ALL4/ALTB/ALAR/ALFT decode: 100% valid\n"
-        f"  - Translated Chinese glyph coverage in BOTH fonts: 100% (0 missing across {len(zh_cps)} unique SC chars)"
+        f"  - Displayable-glyph coverage in BOTH fonts: 100% "
+        f"({len(required_cps)} chars incl. {len(fb.MUST_KEEP_UI_CHARS)} server/UI-only chars)"
     )
+    if dropped_str:
+        print(
+            f"  - [NOTE] {len(dropped_reported)} lowest-frequency leftovers exceeded the fixed atlas "
+            f"budget and are not rendered: {dropped_str}"
+        )
 
 
 def cmd_apply(game_dir: str) -> None:

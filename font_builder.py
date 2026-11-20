@@ -3,16 +3,28 @@ Build Chinese-capable Aqualead ALFT bitmap fonts (MainFont.aft & MainFontFix.aft
 with exact original file sizes so Aigis.exe accepts them without any binary modification.
 
 Strategy:
-  1. Preserve 100% of original glyphs for ASCII, punctuation, Kana, and all Japanese Kanji
-     actually referenced by game tables.
-  2. Replace unused slots (Cyrillic, Greek, unused JIS Level-2 kanji) with crisp 28x28 4bpp
-     Simplified Chinese glyphs rendered via Windows Microsoft YaHei Bold (msyhbd.ttc),
-     calibrated to the exact advance width (24px) and ink box (x[0..23], y[0..23]) of
-     Aigis's native glyphs.
-  3. Pad trailing zeros to match exact original byte size (1,727,372 B / 1,618,424 B).
+  1. Collect EVERY codepoint the client can actually put on screen:
+       - all string pools of the post-patch tables (recursively through ALL4 -> ALAR v3 -> ALTB,
+         including the 800+ nested event / paev03 archives),
+       - UTF-8 literals hard-coded inside Aigis.exe (兵舎 / 神殿 / 選択 / 執務室 ...),
+       - the curated MUST_KEEP_UI_CHARS list for text pushed by the server at runtime
+         (present-box titles such as 「不具合のお詫び」「10/29緊急メンテナンス対応の補填」,
+          mission rewards such as 「統帥の塔 第10階層 階層スコア」).
+  2. Allocate the fixed glyph budget by MEASURED in-game usage frequency instead of blindly
+     evicting "Japanese looking" slots, so a glyph that the UI actually draws can never be
+     traded away for a Chinese character that is never displayed.
+  3. Render only the glyphs that are genuinely missing; every codepoint that already exists in
+     the original font keeps its original (style-matched) bitmap.
+  4. Fill the exact original byte size (1,727,372 B / 1,618,424 B) with trailing zeros.
+
+NOTE: the ALFT bitmap atlas is size-locked by Aigis.exe's cache check, so the glyph budget is
+~4,280 cells per font. `build_chinese_alft` therefore reports `dropped_low_priority` explicitly
+instead of silently producing red "missing glyph" boxes.
 """
 
 import os
+import unicodedata
+from collections import Counter
 from typing import Dict, Iterable, List, Optional, Set, Tuple
 from PIL import Image, ImageDraw, ImageFont
 
@@ -149,119 +161,399 @@ _FONT_CACHE: Dict[Tuple[str, int], ImageFont.FreeTypeFont] = {}
 _REF_CACHE: Dict[Tuple[str, int, str], Tuple[int, int, int, int]] = {}
 
 
-def collect_used_game_codepoints(game_dir: str, patch_out_dir: Optional[str] = None) -> Set[int]:
+# ---------------------------------------------------------------------------
+# Codepoint inventory: everything the client can actually draw
+# ---------------------------------------------------------------------------
+
+# Characters that only ever arrive from the SERVER (present-box titles, maintenance
+# compensation mail, floor-score rewards) and therefore can never be found by scanning
+# the local tables. Each entry below was observed as a red "missing glyph" box in-game:
+#   不具合のお詫び / 10/29緊急メンテナンス対応の補填 / 統帥の塔 第10階層 階層スコア
+#   第1兵舎 / ★4以下ユニット預かり所 / 一括選択・選択解除
+MUST_KEEP_UI_CHARS = "詫層緊舎預択"
+
+_JIS_L1: Optional[Set[int]] = None
+
+
+def jis_level1_codepoints() -> Set[int]:
+    """JIS X 0208 Level-1 kanji (rows 16-47) — the everyday Japanese kanji set."""
+    global _JIS_L1
+    if _JIS_L1 is None:
+        cps: Set[int] = set()
+        for b1 in range(0x88, 0x99):
+            for b2 in range(0x40, 0xFD):
+                try:
+                    cps.add(ord(bytes([b1, b2]).decode("cp932")))
+                except UnicodeDecodeError:
+                    pass
+        _JIS_L1 = cps
+    return _JIS_L1
+
+
+def _is_displayable_jp(cp: int) -> bool:
+    """True for kana / CJK punctuation / fullwidth forms / JIS Level-1 kanji."""
+    if 0x3000 <= cp <= 0x30FF or 0xFF01 <= cp <= 0xFF60 or 0xFFE0 <= cp <= 0xFFE6:
+        return True
+    return cp in jis_level1_codepoints()
+
+
+def scan_exe_ui_literals(exe_path: str, min_run: int = 2) -> Set[int]:
     """
-    Collect all codepoints >= 0x21 actually present in effective post-patch .cache ALTB/ALAR files.
-    When patch_out_dir is provided, reads patched files in preference to originals so Japanese-only
-    kanji replaced by Chinese translations automatically free up glyph slots.
+    Extract CJK text hard-coded as UTF-8 literals inside Aigis.exe.
+
+    The exe draws a number of labels that never appear in any .atb table
+    (兵舎 / 神殿 / 執務室 / 選択 / 一括選択 / ★4以下ユニット預かり所 ...).  A naive
+    "decode the whole PE as UTF-8 and keep every CJK char" pass produces thousands of
+    false positives from binary noise, so a run is only accepted when every character
+    is a plausible Japanese character (kana / punctuation / JIS Level-1 kanji).
+    """
+    if not exe_path or not os.path.exists(exe_path):
+        return set()
+    raw = open(exe_path, "rb").read()
+    text = raw.decode("utf-8", errors="ignore")
+
+    found: Set[int] = set()
+    run: List[int] = []
+    for ch in text:
+        cp = ord(ch)
+        if 0x4E00 <= cp <= 0x9FFF or 0x3040 <= cp <= 0x30FF or 0x3000 <= cp <= 0x303F or 0xFF01 <= cp <= 0xFF60:
+            run.append(cp)
+        else:
+            if len(run) >= min_run and all(_is_displayable_jp(cp) for cp in run):
+                found.update(run)
+            run = []
+    if len(run) >= min_run and all(_is_displayable_jp(cp) for cp in run):
+        found.update(run)
+    return found
+
+
+def _walk_payload(
+    payload: bytes,
+    cps: Set[int],
+    weights: Counter,
+    stats: Dict[str, int],
+    depth: int = 0,
+    examples: Optional[Dict[int, List[str]]] = None,
+) -> None:
+    """Recursively decode ALL4 -> ALAR v3 -> ALTB and accumulate every displayed codepoint."""
+    if depth > 6 or len(payload) < 8:
+        return
+    head = payload[:4]
+    if head == b"ALL4":
+        stats["all4"] += 1
+        try:
+            _walk_payload(af.decompress_all4(payload)[2], cps, weights, stats, depth + 1, examples)
+        except Exception:
+            stats["fail"] += 1
+    elif head == b"ALTB":
+        try:
+            tbl = af.parse_altb(payload)
+            txt = tbl.string_pool.decode("utf-8", errors="ignore")
+            stats["altb"] += 1
+        except Exception:
+            stats["fail"] += 1
+            return
+        for ch in txt:
+            cp = ord(ch)
+            if 0x21 <= cp <= 0xFFFF:
+                cps.add(cp)
+                weights[cp] += 1
+        if examples is not None:
+            for ch in set(txt):
+                cp = ord(ch)
+                if cp < 0x21 or len(examples.get(cp, ())) >= 2:
+                    continue
+                i = txt.find(ch)
+                snippet = txt[max(0, i - 12) : i + 13].replace("\n", " ")
+                snippet = "".join(c for c in snippet if c >= " " or c == " ")
+                examples.setdefault(cp, []).append(snippet)
+    elif head == b"ALAR":
+        stats["alar"] += 1
+        try:
+            entries = af.parse_alar_v3(payload)
+        except Exception:
+            stats["fail"] += 1
+            return
+        for e in entries:
+            _walk_payload(e.data, cps, weights, stats, depth + 1, examples)
+
+
+def collect_displayed_text(
+    game_dir: str,
+    patch_out_dir: Optional[str] = None,
+    examples: Optional[Dict[int, List[str]]] = None,
+) -> Tuple[Set[int], Counter]:
+    """
+    Collect (codepoints, occurrence-weights) for EVERY character the patched client can display.
+
+    Reads the post-patch tables in preference to the originals (so Japanese kanji that the
+    Chinese translation made unreachable stop consuming glyph slots) and recurses through the
+    nested .aar archives — the previous implementation only looked at top-level ALTB files,
+    which silently dropped every event / paev03 story table and caused the red boxes.
     """
     cache_dir = os.path.join(game_dir, ".cache")
     patch_cache = os.path.join(patch_out_dir, ".cache") if patch_out_dir else None
-    used: Set[int] = set()
-    # Always keep ASCII + Japanese Kana + basic fullwidth punctuation
-    for cp in range(0x21, 0x7F):
-        used.add(cp)
-    for cp in range(0x3000, 0x30FF):
-        used.add(cp)
-    for cp in range(0xFF01, 0xFF60):
-        used.add(cp)
 
-    for fn in os.listdir(cache_dir):
-        if fn.endswith(".md5"):
+    cps: Set[int] = set()
+    weights: Counter = Counter()
+    stats = {"all4": 0, "altb": 0, "alar": 0, "fail": 0, "files": 0}
+
+    if os.path.isdir(cache_dir):
+        for fn in sorted(os.listdir(cache_dir)):
+            if fn.endswith(".md5") or fn.endswith(".tmp"):
+                continue
+            src = os.path.join(cache_dir, fn)
+            if not os.path.isfile(src):
+                continue
+            if patch_cache and os.path.exists(os.path.join(patch_cache, fn)):
+                src = os.path.join(patch_cache, fn)
+            try:
+                raw = open(src, "rb").read()
+            except OSError:
+                continue
+            stats["files"] += 1
+            _walk_payload(raw, cps, weights, stats, examples=examples)
+
+    # UTF-8 literals hard-coded in the executable (pure client-side UI labels)
+    for exe_name in ("Aigis.exe", "aigis_exe.exe"):
+        exe_path = os.path.join(game_dir, exe_name)
+        if os.path.exists(exe_path):
+            exe_cps = scan_exe_ui_literals(exe_path)
+            cps |= exe_cps
+            for cp in exe_cps:
+                weights[cp] += 1
+            break
+
+    # Base inventory that must always stay renderable
+    base: Set[int] = set(range(0x21, 0x7F))
+    base |= set(range(0x3000, 0x30FF))
+    base |= set(range(0xFF01, 0xFF60))
+    cps |= base
+    for cp in base:
+        weights[cp] += 1
+
+    collect_displayed_text.last_stats = stats  # type: ignore[attr-defined]
+    return cps, weights
+
+
+def collect_used_game_codepoints(game_dir: str, patch_out_dir: Optional[str] = None) -> Set[int]:
+    """Backwards-compatible wrapper returning just the codepoint set."""
+    return collect_displayed_text(game_dir, patch_out_dir=patch_out_dir)[0]
+
+
+def collect_display_priority_codepoints(game_dir: str, patch_out_dir: Optional[str] = None) -> Set[int]:
+    """
+    Codepoints that live in the WHITELISTED display columns of catalog.py.
+
+    A raw string-pool scan cannot tell a displayed sentence from an internal ID or a dead string
+    (`item_007000藍翼の大天狗ナゴミtrade_item`), so pool-only characters would compete with real
+    UI text for the fixed glyph budget and could be kept while a visible character got evicted.
+    These codepoints are ranked above pool-only characters so that everything the player can
+    actually read always has a glyph.
+    """
+    try:
+        from catalog import ALAR_ARCHIVES, TRANSLATABLE_TABLES
+    except Exception:
+        return set()
+
+    cache_dir = os.path.join(game_dir, ".cache")
+    patch_cache = os.path.join(patch_out_dir, ".cache") if patch_out_dir else None
+    cps: Set[int] = set()
+
+    def scan_tbl(tbl: "af.AltbTable", columns: Iterable[str]) -> None:
+        if not (tbl.form & 0x04):
+            return
+        for row in range(tbl.count):
+            strs = tbl.get_row_strings(row)
+            for col in columns:
+                val = strs.get(col) or ""
+                for ch in val:
+                    cp = ord(ch)
+                    if 0x21 <= cp <= 0xFFFF:
+                        cps.add(cp)
+
+    def load(sha: str) -> Optional[bytes]:
+        src = os.path.join(cache_dir, sha)
+        if patch_cache and os.path.exists(os.path.join(patch_cache, sha)):
+            src = os.path.join(patch_cache, sha)
+        if not os.path.exists(src):
+            return None
+        raw = open(src, "rb").read()
+        return af.decompress_all4(raw)[2] if af.is_all4(raw) else raw
+
+    for spec in TRANSLATABLE_TABLES:
+        payload = load(spec.sha256)
+        if payload and payload[:4] == b"ALTB":
+            try:
+                scan_tbl(af.parse_altb(payload), spec.columns)
+            except Exception:
+                pass
+
+    for aspec in ALAR_ARCHIVES:
+        payload = load(aspec.sha256)
+        if not payload or payload[:4] != b"ALAR":
             continue
-        p = os.path.join(patch_cache, fn) if (patch_cache and os.path.exists(os.path.join(patch_cache, fn))) else os.path.join(cache_dir, fn)
-        raw = open(p, "rb").read()
-        payload = af.decompress_all4(raw)[2] if af.is_all4(raw) else raw
-        if payload[:4] == b"ALTB" and (payload[5] & 0x04):
-            tbl = af.parse_altb(payload)
-            txt = tbl.string_pool.decode("utf-8", errors="ignore")
-            for ch in txt:
-                cp = ord(ch)
-                if 0x21 <= cp <= 0xFFFF:
-                    used.add(cp)
-    return used
+        try:
+            entries = af.parse_alar_v3(payload)
+        except Exception:
+            continue
+        for e in entries:
+            subs = af.parse_alar_v3(e.data) if af.is_alar_v3(e.data) else [e]
+            for se in subs:
+                data = se.data
+                if data[:4] == b"ALL4":
+                    try:
+                        data = af.decompress_all4(data)[2]
+                    except Exception:
+                        continue
+                if data[:4] != b"ALTB":
+                    continue
+                try:
+                    scan_tbl(af.parse_altb(data), aspec.columns)
+                except Exception:
+                    pass
+    return cps
+
+
+# ---------------------------------------------------------------------------
+# Glyph budget allocation
+# ---------------------------------------------------------------------------
+
+# Codepoints that must ALWAYS stay renderable, regardless of measured usage:
+# ASCII, kana, CJK punctuation, fullwidth forms (and halfwidth kana range tail).
+# Unassigned code points are filtered out — they would burn atlas cells for nothing.
+def _assigned(cps: Iterable[int]) -> Set[int]:
+    return {cp for cp in cps if unicodedata.category(chr(cp)) != "Cn"}
+
+
+_BASE_ALWAYS = _assigned(
+    set(range(0x21, 0x7F))
+    | set(range(0x3000, 0x30FF))
+    | set(range(0xFF01, 0xFF60))
+    | set(range(0xFFE0, 0xFFE6))
+)
+
+
+def _blank_glyph(font: af.AlftFont) -> Tuple[int, bytes]:
+    return (24, bytes(font.gw * font.gh))
+
+
+def _fit_capacity(font: af.AlftFont, target_size: int, ranked_cps: List[int]) -> int:
+    """
+    Largest prefix length of `ranked_cps` whose serialized ALFT still fits `target_size` bytes.
+
+    Aigis.exe compares the cached font size against the server manifest, so the atlas can never
+    grow; the only freedom is how many cells to fill. Blank placeholders are used during the
+    binary search (identical byte size, no rasterisation) which keeps the search cheap, and the
+    prefix is re-sorted by codepoint before serializing because the ALFT range table stores 6
+    bytes per *contiguous run* — packing the kept set densely buys ~30 extra glyph slots.
+    """
+    def fits(n: int) -> bool:
+        glyphs = {cp: font.glyphs.get(cp) or _blank_glyph(font) for cp in sorted(ranked_cps[:n])}
+        trial = af.AlftFont(
+            ver=font.ver,
+            form=font.form,
+            tag=font.tag,
+            gw=font.gw,
+            gh=font.gh,
+            cols=font.cols,
+            img_w=font.img_w,
+            palette=font.palette,
+            alig_meta=font.alig_meta,
+            glyphs=glyphs,
+        )
+        try:
+            af.build_alft(trial, target_size=target_size)
+            return True
+        except ValueError:
+            return False
+
+    if fits(len(ranked_cps)):
+        return len(ranked_cps)
+    lo, hi = 0, len(ranked_cps)
+    while lo < hi:
+        mid = (lo + hi + 1) // 2
+        if fits(mid):
+            lo = mid
+        else:
+            hi = mid - 1
+    return lo
 
 
 def build_chinese_alft(
     orig_alft_bytes: bytes,
     required_chars: Iterable[str],
-    used_game_cps: Set[int],
+    used_game_cps: Optional[Set[int]] = None,
     ttf_path: Optional[str] = None,
-    fill_gb2312: bool = True,
+    fill_gb2312: bool = False,
+    char_weights: Optional[Counter] = None,
+    priority_cps: Optional[Set[int]] = None,
 ) -> Tuple[bytes, Dict]:
     """
-    Inject required Simplified Chinese glyphs (plus optional extra GB2312-L1 glyphs)
-    into an ALFT font while keeping ALL required translated chars + ASCII + Kana + as many
-    used original Japanese glyphs as fit inside exact original file byte size.
+    Rebuild a fixed-size Aqualead ALFT bitmap font so that every character the client can
+    actually display has a glyph.
+
+    Priority (highest first):
+      1. ASCII / kana / CJK punctuation  +  ``MUST_KEEP_UI_CHARS`` (server-pushed text)
+      2. Every remaining codepoint found in the post-patch tables, the nested .aar story
+         archives and the Aigis.exe UI literals, ranked by measured in-game frequency.
+      3. (optional) speculative GB2312 filler — only with genuinely unused budget.
+
+    The old implementation evicted "Japanese looking" slots in bulk (tier 2) and then filled the
+    freed space with GB2312 filler characters that never appear in the game, which is exactly why
+    「お詫び」「階層」「緊急」「兵舎」「預かり所」「選択」 rendered as red missing-glyph boxes.
     """
     ttf = find_chinese_ttf(ttf_path)
     target_size = len(orig_alft_bytes)
     font = af.parse_alft(orig_alft_bytes)
     orig_cps = set(font.glyphs.keys())
 
-    # Required codepoints: ALL translated chars + ASCII + basic punctuation
-    ascii_and_punct = set(range(0x21, 0x7F)) | {0x3001, 0x3002, 0x300C, 0x300D, 0x300E, 0x300F, 0x3010, 0x3011}
-    req_cps = {ord(c) for c in required_chars if 0x21 <= ord(c) <= 0xFFFF} | (ascii_and_punct & orig_cps)
-    missing_req = sorted(req_cps - orig_cps)
+    zh_cps = {ord(c) for c in required_chars if 0x21 <= ord(c) <= 0xFFFF}
+    required: Set[int] = set(zh_cps)
+    if used_game_cps:
+        required |= {cp for cp in used_game_cps if 0x21 <= cp <= 0xFFFF}
+    required |= {ord(c) for c in MUST_KEEP_UI_CHARS}
+    required = {cp for cp in required if 0x21 <= cp <= 0xFFFF}
 
-    # Eviction priority:
-    #   Tier 0 (evict first): Cyrillic/Greek/misc symbols not in used_game_cps or req_cps
-    #   Tier 1: Unused original glyphs (not in used_game_cps or req_cps)
-    #   Tier 2 (only if still tight): Used original JP kanji NOT in req_cps and NOT ASCII/Kana
-    unused_orig = orig_cps - used_game_cps - req_cps
-    used_nonreq_jp = (orig_cps & used_game_cps) - req_cps - set(range(0x21, 0x7F)) - set(range(0x3000, 0x30FF))
+    weights = char_weights or Counter()
+    displayed: Set[int] = {cp for cp in (used_game_cps or set()) if 0x21 <= cp <= 0xFFFF}
+    priority: Set[int] = {cp for cp in (priority_cps or set()) if 0x21 <= cp <= 0xFFFF}
 
-    evict_tier01 = sorted(
-        unused_orig,
-        key=lambda cp: (
-            0 if (0x00A0 <= cp <= 0x04FF or 0x2000 <= cp <= 0x2FFF) else 1,
-            -cp,
-        ),
-    )
-    evict_tier2 = sorted(used_nonreq_jp, reverse=True)
-    evict_order = evict_tier01 + evict_tier2
+    always = required & _BASE_ALWAYS
+    must = {ord(c) for c in MUST_KEEP_UI_CHARS} & required
+    rest = required - always - must
 
-    # Reserve generous room for range table + widths + ALIG header
-    max_alig_bytes = target_size - 32000 - 96
-    max_rows = max_alig_bytes // (font.img_w * font.gh // 2)
-    max_glyphs = max_rows * font.cols
+    def rank(cp: int) -> Tuple[int, int, int, int]:
+        # Tier 0: characters in whitelisted display columns — the player actually reads these.
+        # Tier 1: characters only found in raw string pools (internal IDs, dead strings, trade
+        #         item keys).  They must never outrank visible text for a glyph slot.
+        # Within a tier: measured occurrence count, then characters present in the scanned
+        # inventory, then codepoint order.
+        return (
+            0 if cp in priority else 1,
+            -weights[cp],
+            0 if cp in displayed else 1,
+            cp,
+        )
 
-    kept_glyphs = dict(font.glyphs)
+    ranked = sorted(always | must) + sorted(rest, key=rank)
 
-    # Evict lowest-priority glyphs if needed to accommodate all missing_req
-    need_total = len(kept_glyphs) + len(missing_req)
-    evicted = 0
-    if need_total > max_glyphs:
-        to_drop = need_total - max_glyphs
-        for cp in evict_order[:to_drop]:
-            if cp in kept_glyphs:
-                del kept_glyphs[cp]
-                evicted += 1
-        evict_order = evict_order[to_drop:]
-
-    # Render and inject ALL required Chinese glyphs (100% guaranteed)
-    added_req = 0
-    for cp in missing_req:
-        kept_glyphs[cp] = render_glyph_28x28(chr(cp), ttf)
-        added_req += 1
-
-    # Pre-fill remaining free slots (and remaining Tier-0/1 unused slots ONLY) with high-freq GB2312 chars
-    remaining_unused = [cp for cp in evict_tier01 if cp in kept_glyphs]
-    added_bonus = 0
     if fill_gb2312:
-        gb1_missing = [cp for cp in get_gb2312_level1_codepoints() if cp not in kept_glyphs]
-        safe_cap = max_glyphs - 18
-        for cp in gb1_missing:
-            if len(kept_glyphs) >= safe_cap:
-                if remaining_unused:
-                    drop_cp = remaining_unused.pop(0)
-                    if drop_cp in kept_glyphs:
-                        del kept_glyphs[drop_cp]
-                        evicted += 1
-                else:
-                    break
-            kept_glyphs[cp] = render_glyph_28x28(chr(cp), ttf)
-            added_bonus += 1
+        ranked = ranked + [cp for cp in get_gb2312_level1_codepoints() if cp not in required]
+
+    capacity = _fit_capacity(font, target_size, ranked)
+    kept = sorted(ranked[:capacity])
+    dropped = [cp for cp in ranked[capacity:] if cp in required]
+
+    kept_set = set(kept)
+    glyphs: Dict[int, Tuple[int, bytes]] = {}
+    rendered = 0
+    for cp in kept:
+        g = font.glyphs.get(cp)
+        if g is None:
+            g = render_glyph_28x28(chr(cp), ttf)
+            rendered += 1
+        glyphs[cp] = g
 
     new_font = af.AlftFont(
         ver=font.ver,
@@ -273,40 +565,42 @@ def build_chinese_alft(
         img_w=font.img_w,
         palette=font.palette,
         alig_meta=font.alig_meta,
-        glyphs=kept_glyphs,
+        glyphs=glyphs,
     )
+    out_bytes = af.build_alft(new_font, target_size=target_size)
 
-    bonus_added_list = [cp for cp in kept_glyphs if cp not in orig_cps and cp not in req_cps]
-    extra_evict = [cp for cp in evict_order if cp in kept_glyphs and cp not in req_cps]
-    while True:
-        try:
-            out_bytes = af.build_alft(new_font, target_size=target_size)
-            break
-        except ValueError:
-            if bonus_added_list:
-                for _ in range(min(18, len(bonus_added_list))):
-                    del new_font.glyphs[bonus_added_list.pop()]
-                    added_bonus -= 1
-            elif extra_evict:
-                for _ in range(min(18, len(extra_evict))):
-                    del new_font.glyphs[extra_evict.pop(0)]
-                    evicted += 1
-            else:
-                raise
-
+    dropped_str = "".join(chr(cp) for cp in dropped)
+    missing_displayed = [cp for cp in dropped if cp in displayed]
+    missing_priority = [cp for cp in dropped if cp in priority]
     stats = {
         "orig_size": target_size,
         "final_size": len(out_bytes),
-        "orig_glyphs": len(orig_cps),
-        "final_glyphs": len(new_font.glyphs),
-        "added_required_sc": added_req,
-        "added_bonus_gb2312": added_bonus,
-        "evicted_unused": evicted,
-        "kept_used_game": len(used_game_cps & set(new_font.glyphs.keys())),
-        "total_used_game": len(used_game_cps & orig_cps),
+        "capacity": capacity,
+        "required_codepoints": len(required),
+        "displayed_codepoints": len(displayed),
+        "priority_codepoints": len(priority),
+        "final_glyphs": len(glyphs),
+        "rendered_new_glyphs": rendered,
+        "reused_original_glyphs": len(kept) - len([cp for cp in kept if cp not in orig_cps]),
+        "added_required_sc": len([cp for cp in kept if cp not in orig_cps]),
+        "added_bonus_gb2312": len([cp for cp in kept if cp not in required]),
+        "dropped_low_priority": dropped,
+        "dropped_low_priority_str": dropped_str,
+        "missing_required": len(dropped),
+        "missing_displayed": len(missing_displayed),
+        "missing_priority": len(missing_priority),
+        "missing_priority_str": "".join(chr(cp) for cp in missing_priority),
+        "kept_used_game": len(displayed & kept_set),
+        "total_used_game": len(displayed - set(range(0x21, 0x7F))),
         "ttf": os.path.basename(ttf),
     }
     return out_bytes, stats
+
+
+def verify_glyph_coverage(alft_bytes: bytes, required_cps: Iterable[int]) -> List[int]:
+    """Return the sorted list of required codepoints that have no glyph in `alft_bytes`."""
+    have = set(af.parse_alft(alft_bytes).glyphs.keys())
+    return sorted({cp for cp in required_cps if cp not in have})
 
 
 def render_preview_png(alft_bytes: bytes, lines: List[str], out_png: str) -> None:
