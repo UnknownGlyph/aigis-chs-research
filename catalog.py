@@ -146,23 +146,22 @@ ROOT_FONT_SHA256 = name_sha256(ROOT_FONT_NAME)   # f00e83cfe03f3252... (in game 
 CACHE_FONT_NAME = "MainFont.aft"
 CACHE_FONT_SHA256 = name_sha256(CACHE_FONT_NAME) # cd4215ec2d8f4371... (in .cache/)
 
-# --- In-battle story dialogue (战中剧情对话) ---------------------------------
-# Each battle keeps its dialogue in its own BattleTalkEvent<questId>.aar; the inner
-# BattleTalkEvent.atb has Message (line) / Name (speaker) columns.
-#
-# IMPORTANT: only list archives that actually have translations. An untranslated
-# archive still contains Japanese, and whitelisting it promotes ~400k characters of
-# Japanese text to "must-keep display" priority, which squeezes real Chinese glyphs out
-# of the fixed 4,284-cell atlas (measured: it evicted 476 Chinese characters).
-# Add the next quest id here once its lines are translated.
-BATTLE_TALK_TRANSLATED = [
-    "BattleTalkEvent500476.aar",   # 终焉要塞宙斯 / 迪亚斯・尤莉尔 决战
-]
+# --- Numbered per-event tables + in-battle dialogue (generated) --------------
+# catalog_generated.py 由 gen_catalog_extra.py 扫描游戏资源生成：
+#   EXTRA_TABLES   — MessageText/QuestNameText/RewardText 的编号表、Shop2ItemV2、SpecialEffectsType
+#   EXTRA_ARCHIVES — 每场战斗独立的 BattleTalkEvent<questId>.aar
+# 这些资源此前不在白名单里（基础表 MessageText.atb 等从不覆盖编号变体），
+# 因此对应文本一直是日文。清单随游戏版本变化，重跑生成脚本即可。
+try:
+    from catalog_generated import EXTRA_ARCHIVES, EXTRA_TABLES
+except ImportError:                                       # 缺少生成文件时保持原行为
+    EXTRA_TABLES, EXTRA_ARCHIVES = [], []
 
-BATTLE_TALK_ARCHIVES: List[AlarSpec] = [
-    AlarSpec(name, name_sha256(name), "direct_atb", "BattleTalkEvent.atb",
-             ["Message", "Name"], "story",
-             "战斗 %s 的剧情对话" % re.search(r"(\d+)", name).group(1))
-    for name in BATTLE_TALK_TRANSLATED
-]
-ALAR_ARCHIVES.extend(BATTLE_TALK_ARCHIVES)
+TRANSLATABLE_TABLES.extend(
+    TableSpec(name, name_sha256(name), cols, cat, desc)
+    for name, cols, cat, desc in EXTRA_TABLES
+)
+ALAR_ARCHIVES.extend(
+    AlarSpec(name, name_sha256(name), "direct_atb", "BattleTalkEvent.atb", cols, "story", desc)
+    for name, cols, desc in EXTRA_ARCHIVES
+)
