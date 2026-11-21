@@ -5,6 +5,7 @@ can never be broken by localization.
 """
 
 import hashlib
+import re
 from dataclasses import dataclass
 from typing import Dict, List
 
@@ -144,3 +145,24 @@ ROOT_FONT_NAME = "MainFontFix.aft"
 ROOT_FONT_SHA256 = name_sha256(ROOT_FONT_NAME)   # f00e83cfe03f3252... (in game root)
 CACHE_FONT_NAME = "MainFont.aft"
 CACHE_FONT_SHA256 = name_sha256(CACHE_FONT_NAME) # cd4215ec2d8f4371... (in .cache/)
+
+# --- In-battle story dialogue (战中剧情对话) ---------------------------------
+# Each battle keeps its dialogue in its own BattleTalkEvent<questId>.aar; the inner
+# BattleTalkEvent.atb has Message (line) / Name (speaker) columns.
+#
+# IMPORTANT: only list archives that actually have translations. An untranslated
+# archive still contains Japanese, and whitelisting it promotes ~400k characters of
+# Japanese text to "must-keep display" priority, which squeezes real Chinese glyphs out
+# of the fixed 4,284-cell atlas (measured: it evicted 476 Chinese characters).
+# Add the next quest id here once its lines are translated.
+BATTLE_TALK_TRANSLATED = [
+    "BattleTalkEvent500476.aar",   # 终焉要塞宙斯 / 迪亚斯・尤莉尔 决战
+]
+
+BATTLE_TALK_ARCHIVES: List[AlarSpec] = [
+    AlarSpec(name, name_sha256(name), "direct_atb", "BattleTalkEvent.atb",
+             ["Message", "Name"], "story",
+             "战斗 %s 的剧情对话" % re.search(r"(\d+)", name).group(1))
+    for name in BATTLE_TALK_TRANSLATED
+]
+ALAR_ARCHIVES.extend(BATTLE_TALK_ARCHIVES)
