@@ -23,6 +23,7 @@ instead of silently producing red "missing glyph" boxes.
 """
 
 import os
+import re
 import unicodedata
 from collections import Counter
 from typing import Dict, Iterable, List, Optional, Set, Tuple
@@ -415,6 +416,72 @@ def collect_display_priority_codepoints(game_dir: str, patch_out_dir: Optional[s
     return cps
 
 
+_SCRIPTY = re.compile(r"[()\[\]{}=,;\"'<>|%\\]")
+_KEYLIKE = re.compile(r"_|[A-Za-z]{3,}")
+_ASCII_ONLY = re.compile(r"^[\x20-\x7e]*$")
+
+
+def collect_table_text_codepoints(game_dir: str, patch_out_dir: Optional[str] = None) -> Set[int]:
+    """
+    Characters that appear in the *text* columns of every local ALTB table, translated or not.
+
+    Rationale: catalog.py lists the tables we translate, but the client also loads numbered
+    variants (`QuestNameText110002.atb`, `MessageText110002.atb`, ...) and small config tables
+    that ship with kanji-only Japanese (`人間 / 獣人 / 重鎧 / 重騎`).  Those strings are drawn on
+    screen, so every character in them needs a glyph — otherwise the client paints its red
+    missing-glyph box.  Values that look like script expressions (`IsEnemyElementAny("...")`),
+    numeric configs (`属性=物理,魔法`) or resource keys (`item_007000…trade_item`) are skipped so
+    they do not steal budget from real text.
+    """
+    cache_dir = os.path.join(game_dir, ".cache")
+    patch_cache = os.path.join(patch_out_dir, ".cache") if patch_out_dir else None
+    cps: Set[int] = set()
+    if not os.path.isdir(cache_dir) and not patch_cache:
+        return cps
+
+    def feed(val: str) -> None:
+        if not val or _ASCII_ONLY.match(val) or _SCRIPTY.search(val) or _KEYLIKE.search(val):
+            return
+        for ch in val:
+            cp = ord(ch)
+            if 0x21 <= cp <= 0xFFFF:
+                cps.add(cp)
+
+    seen: Set[str] = set()
+    for src_dir in [d for d in (cache_dir, patch_cache) if d and os.path.isdir(d)]:
+        for fn in os.listdir(src_dir):
+            if fn.endswith(".md5"):
+                continue
+            path = os.path.join(src_dir, fn)
+            try:
+                if os.path.getsize(path) > 4 * 1024 * 1024:
+                    continue
+                raw = open(path, "rb").read()
+            except OSError:
+                continue
+            if raw[:4] == b"ALAR":
+                continue
+            payload = af.decompress_all4(raw)[2] if af.is_all4(raw) else raw
+            if payload[:4] != b"ALTB" or payload in seen:
+                continue
+            seen.add(payload)
+            try:
+                tbl = af.parse_altb(payload)
+            except Exception:
+                continue
+            if not (tbl.form & 0x04):
+                continue
+            try:
+                fields = [f.name_en for f in tbl.string_fields()]
+            except Exception:
+                continue
+            for row in range(tbl.count):
+                vals = tbl.get_row_strings(row)
+                for col in fields:
+                    feed(vals.get(col) or "")
+    return cps
+
+
 # ---------------------------------------------------------------------------
 # Glyph budget allocation
 # ---------------------------------------------------------------------------
@@ -488,6 +555,7 @@ def build_chinese_alft(
     fill_gb2312: bool = False,
     char_weights: Optional[Counter] = None,
     priority_cps: Optional[Set[int]] = None,
+    secondary_priority_cps: Optional[Set[int]] = None,
 ) -> Tuple[bytes, Dict]:
     """
     Rebuild a fixed-size Aqualead ALFT bitmap font so that every character the client can
@@ -518,6 +586,7 @@ def build_chinese_alft(
     weights = char_weights or Counter()
     displayed: Set[int] = {cp for cp in (used_game_cps or set()) if 0x21 <= cp <= 0xFFFF}
     priority: Set[int] = {cp for cp in (priority_cps or set()) if 0x21 <= cp <= 0xFFFF}
+    secondary: Set[int] = {cp for cp in (secondary_priority_cps or set()) if 0x21 <= cp <= 0xFFFF}
 
     always = required & _BASE_ALWAYS
     must = {ord(c) for c in MUST_KEEP_UI_CHARS} & required
@@ -529,12 +598,15 @@ def build_chinese_alft(
         #         item keys).  They must never outrank visible text for a glyph slot.
         # Within a tier: measured occurrence count, then characters present in the scanned
         # inventory, then codepoint order.
-        return (
-            0 if cp in priority else 1,
-            -weights[cp],
-            0 if cp in displayed else 1,
-            cp,
-        )
+        if cp in priority:
+            tier = 0            # whitelisted display columns — must never be evicted
+        elif cp in secondary:
+            tier = 1            # text in tables we do not translate (numbered tower tables, configs)
+        elif cp in displayed:
+            tier = 2            # raw string-pool characters (internal IDs, dead strings)
+        else:
+            tier = 3            # dictionary-only leftovers
+        return (tier, -weights[cp], cp)
 
     ranked = sorted(always | must) + sorted(rest, key=rank)
 
@@ -579,6 +651,7 @@ def build_chinese_alft(
         "required_codepoints": len(required),
         "displayed_codepoints": len(displayed),
         "priority_codepoints": len(priority),
+        "secondary_codepoints": len(secondary),
         "final_glyphs": len(glyphs),
         "rendered_new_glyphs": rendered,
         "reused_original_glyphs": len(kept) - len([cp for cp in kept if cp not in orig_cps]),

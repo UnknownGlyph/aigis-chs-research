@@ -70,6 +70,20 @@ TRANSLATABLE_TABLES: List[TableSpec] = [
     TableSpec("NameText.atb", name_sha256("NameText.atb"), ["Message", "RealName"], "gameplay", "单位/角色名称"),
     TableSpec("StatusText.atb", name_sha256("StatusText.atb"), ["Message"], "story", "角色简介/背景/图鉴说明文本"),
     TableSpec("QuestEventText.atb", name_sha256("QuestEventText.atb"), ["Message", "Name"], "story", "关卡前后剧情对话文本"),
+
+    # --- Tower content, split into per-tower tables (英傑/統帥/悪霊の塔) -------------
+    # The client loads numbered variants instead of the base table, so the base entries above
+    # never covered them; their text is kanji-only Japanese (人間/獣人/重鎧/重騎), which a
+    # kana-based "is it translated yet" check cannot see.
+    TableSpec("QuestNameText110001.atb", name_sha256("QuestNameText110001.atb"), ["Message"], "mission", "英杰之塔层名(第N阶层)"),
+    TableSpec("QuestNameText110002.atb", name_sha256("QuestNameText110002.atb"), ["Message"], "mission", "统帅之塔层名(种族/兵种+罗马数字)"),
+    TableSpec("QuestNameText110003.atb", name_sha256("QuestNameText110003.atb"), ["Message"], "mission", "恶灵之塔层名(第N层)"),
+    TableSpec("MessageText110001.atb", name_sha256("MessageText110001.atb"), ["Message"], "mission", "英杰之塔各层敌人/条件说明"),
+    TableSpec("MessageText110002.atb", name_sha256("MessageText110002.atb"), ["Message"], "mission", "统帅之塔各层推荐属性/敌人/条件说明"),
+    TableSpec("MessageText110003.atb", name_sha256("MessageText110003.atb"), ["Message"], "mission", "恶灵之塔各层敌人/出击限制说明"),
+    TableSpec("RewardText110001.atb", name_sha256("RewardText110001.atb"), ["Text"], "ui", "英杰之塔玩法/结晶/交换所说明"),
+    TableSpec("RewardText110002.atb", name_sha256("RewardText110002.atb"), ["Text"], "ui", "统帅之塔玩法/结晶/交换所说明"),
+    TableSpec("RewardText110003.atb", name_sha256("RewardText110003.atb"), ["Text"], "ui", "恶灵之塔玩法/结晶/交换所说明"),
 ]
 
 TABLES_BY_NAME: Dict[str, TableSpec] = {t.name: t for t in TRANSLATABLE_TABLES}

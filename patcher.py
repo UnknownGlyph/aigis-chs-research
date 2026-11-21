@@ -410,10 +410,11 @@ def cmd_build(game_dir: str, ttf_path: Optional[str] = None) -> None:
     print("\n=== [3/4] Rebuilding Chinese ALFT bitmap fonts ===")
     used_game_cps, char_weights = fb.collect_displayed_text(game_dir, patch_out_dir=PATCH_OUT_DIR)
     priority_cps = fb.collect_display_priority_codepoints(game_dir, patch_out_dir=PATCH_OUT_DIR)
+    table_text_cps = fb.collect_table_text_codepoints(game_dir, patch_out_dir=PATCH_OUT_DIR)
     scan_stats = getattr(fb.collect_displayed_text, "last_stats", {})
     print(
         f"  Displayed codepoint inventory: {len(used_game_cps)} chars "
-        f"({len(priority_cps)} in display columns, "
+        f"({len(priority_cps)} in display columns, {len(table_text_cps)} in untranslated table text, "
         f"{scan_stats.get('altb', 0)} ALTB tables, {scan_stats.get('alar', 0)} ALAR archives, "
         f"{scan_stats.get('fail', 0)} unreadable)"
     )
@@ -435,6 +436,7 @@ def cmd_build(game_dir: str, ttf_path: Optional[str] = None) -> None:
             fill_gb2312=False,
             char_weights=char_weights,
             priority_cps=priority_cps,
+            secondary_priority_cps=table_text_cps,
         )
         dst_path = os.path.join(PATCH_OUT_DIR, rel_path)
         os.makedirs(os.path.dirname(dst_path), exist_ok=True)
@@ -456,7 +458,7 @@ def cmd_build(game_dir: str, ttf_path: Optional[str] = None) -> None:
             )
         if fstats["missing_required"]:
             print(
-                f"  [INFO] {fname}: {fstats['missing_required'] - fstats['missing_priority']} pool-only "
+                f"  [INFO] {fname}: {fstats['missing_required'] - fstats['missing_priority']} low-priority "
                 f"char(s) (internal IDs / dead strings, not rendered by any display column) exceeded the "
                 f"fixed atlas budget and were dropped."
             )
