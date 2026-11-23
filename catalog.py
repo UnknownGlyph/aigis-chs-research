@@ -26,7 +26,7 @@ def name_sha256(name: str) -> str:
 # Verified safe display-text tables mapped from Aigis.exe + .cache/
 TRANSLATABLE_TABLES: List[TableSpec] = [
     # --- Core UI & Dialogs ---
-    TableSpec("UiText.atb", name_sha256("UiText.atb"), ["Caption", "Help", "HelpMessage"], "ui", "菜单标题、帮助分类与帮助说明"),
+    TableSpec("UiText.atb", name_sha256("UiText.atb"), ["Caption", "Help", "HelpMessage", "Faq", "FaqDetail"], "ui", "菜单标题、帮助说明与FAQ问答"),
     TableSpec("MessageBoxText.atb", name_sha256("MessageBoxText.atb"), ["Message"], "ui", "系统弹窗提示与报错信息"),
     TableSpec("GuideText.atb", name_sha256("GuideText.atb"), ["Message"], "ui", "主界面与各界面副官安娜引导台词"),
     TableSpec("GoQuestWarningText.atb", name_sha256("GoQuestWarningText.atb"), ["Message"], "ui", "出击编队条件不足时的警告弹窗"),

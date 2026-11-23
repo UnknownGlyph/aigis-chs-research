@@ -8,6 +8,7 @@ __pycache__/
 backup/
 backup_retranslate/
 extracted/
+android_sync/
 
 # Locally built binary patch files (built locally via `python patcher.py build`)
 # Keep patch_out/font_preview.png for README documentation

@@ -170,8 +170,8 @@ _REF_CACHE: Dict[Tuple[str, int, str], Tuple[int, int, int, int]] = {}
 # compensation mail, floor-score rewards) and therefore can never be found by scanning
 # the local tables. Each entry below was observed as a red "missing glyph" box in-game:
 #   不具合のお詫び / 10/29緊急メンテナンス対応の補填 / 統帥の塔 第10階層 階層スコア
-#   第1兵舎 / ★4以下ユニット預かり所 / 一括選択・選択解除
-MUST_KEEP_UI_CHARS = "詫層緊舎預択"
+#   第1兵舎 / ★4以下ユニット預かり所 / 一括選択・選択解除 / 任務報酬 / 記念キャンペーン
+MUST_KEEP_UI_CHARS = "詫層緊舎預択報記階"
 
 _JIS_L1: Optional[Set[int]] = None
 

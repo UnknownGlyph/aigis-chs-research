@@ -166,5 +166,65 @@ python local_hymt2_translate.py --serve --port 8000
 | `translations/batch_06_story_events.json` | 主页/周年庆与历代活动剧情对话（`EventHomeArc.aar` + `EventArc.aar`） |
 | `translations/batch_07_status_text.json` | 角色立绘台词与图鉴简介（`StatusText.atb`） |
 | `translations/batch_08_story_paev03.json` | 角色个人交流剧情对话（`paev03.aar`） |
+| `translations/batch_09_tower_names.json` | 英杰/统帅/恶灵之塔层级名称 |
+| `translations/batch_10_tower_text.json` | 英杰/统帅/恶灵之塔关卡说明与敌人配置说明 |
+| `translations/batch_11_battle_talk.json` | 战中剧情对话精译（`BattleTalkEvent*.aar`） |
+| `translations/batch_12_terms.json` | 战中说话人名称、商店礼包与特殊效果说明 |
+| `translations/batch_13_mt_story.json` | 战中剧情台词批量补译 |
+| `translations/batch_14_mt_strings.json` | 编号表关卡名与提示文本 |
+| `translations/batch_15_fix_tables.json` | 纯净清洗与纠错词典（修复机翻误译、假名残留并解决超字节截断） |
+| `translations/batch_16_alod_ui.json` | 550 条 `ALOD` 原生界面布局标签（`@生命`、`队伍编成`、`一键领取` 等） |
+| `translations/batch_17_harlem.json` | 3,600+ 篇全量角色好感交流剧情（`HarlemEventText0/1.aar`） |
+| `translations/opening_loading_zh.json` | 序章教程剧情（`Opening.aar`）与加载 Tips（`LoadIconBack.aar`） |
 
 修改任意 JSON 文件后，运行 `python patcher.py build` 与 `python patcher.py apply`（或双击 `1_安装汉化补丁.bat`），工具会自动将新字符渲染进字库并更新补丁。
+
+---
+
+## 六、安卓端（MuMu Player / 模拟器 / 手机 APK）全量汉化与红叉彻底修复指南
+
+针对安卓客户端（v3.1.0，包名 `com.dmm.games.aigisgp`），本工具链提供了全自动提取、词典清洗、字库重构、APK 重签名与一键 ADB 部署方案。
+
+### 1. 红叉（缺字方框 ☒）根因与彻底修复
+
+1. **服务端动态下发字符缺失（礼物箱红叉）**：
+   - 礼物箱邮件与任务奖励（如 `任務報酬`、`13周年記念キャンペーン`、`第10階層` 等）中的汉字由服务端实时推送，未在客户端离线表中。原字库未将其设为保留字，导致高频出现红色叉号方框。
+   - **修复**：将 `詫層緊舎預択報記階` 纳入永久保留高优先级字符集，保证礼物箱与邮件标题 100% 完整显示。
+2. **基底字库滞后**：
+   - 设备安装的原版 APK 内置 `assets/MainFontFix.aft` 为纯日文版，在游戏初始化时容易导致缺字。
+   - **修复**：使用 `font_builder.py` 同步生成内置简体中文字库，并通过 `uber-apk-signer` v1/v2/v3 重新对齐签名生成更新 APK，支持 `adb install -r` 无损保留玩家 Data 1 / Data 2 存档覆盖安装。
+3. **字库容量与字符竞争**：
+   - Aqualead 引擎位图字库 `MainFont.aft` 容量上限为 4,284 格。工具链通过**简繁统一**、**精简 `_BASE_ALWAYS` 中未使用的全角拉丁死字符**，以及平替极低频同义冷僻字，实现 **4,284/4,284 满格且展示文本 100% 覆盖（`missing_priority = 0`）**。
+
+### 2. 遗漏文本全量补齐
+
+- **帮助手册与 FAQ 问答**：`UiText.atb` 补齐 `["Faq", "FaqDetail"]`，31 篇 FAQ 问答 100% 汉化。
+- **ALOD 原生界面布局标签**：在 76 个 `.aar` 归档内安全原地替换 1,173 处 `ALOD` UI 字符串槽位（`batch_16_alod_ui.json`），使 `@生命`、`@击破数`、`队伍编成`、`一键领取`、`统帅之塔`、`好感交流` 等原生 UI 全部呈现中文。
+- **开门故事与加载 Tips**：精译并打包 `LoadIconBack.aar`（6 条 Tips）与 `Opening.aar`（23 篇序章/教程剧情）。
+- **好感度交流剧情全量汉化**：补齐 `HarlemEventText0.aar`（280 篇）与 `HarlemEventText1.aar`（3,377 篇）全量剧情（`batch_17_harlem.json`），修复条目超 3,000 时的表头偏移问题。
+- **机翻毛刺洗白与零截断**：修正 161 处历史机翻毛刺（如 `ライフ`→`生命`、`受取`→`领取`、`ヤマタノオロチ`→`八岐大蛇` 等），并微调关卡名称译文长度消除所有表截断丢弃（0 Drops）。
+
+### 3. 安卓端使用步骤
+
+#### 快速一键构建并推送到模拟器（推荐）
+
+确保 MuMu 模拟器已开启并在 `127.0.0.1:7555` 开启 ADB 与 root 权限：
+
+```powershell
+# 1. 运行完整构建、包含 Harlem 交流剧情并自动推送到模拟器并拉起游戏
+python build_android_complete.py --include-harlem --push
+
+# 2. 仅在本地构建并进行 100% 字符覆盖校验（不推送到设备）
+python build_android_complete.py --include-harlem --dry-run
+```
+
+#### 模拟器硬件触控与截屏调试工具
+
+仓库内置了针对横屏 Aqualead 原生界面的触控工具 `adb_ctrl.py`：
+```powershell
+# 截取屏幕
+python adb_ctrl.py shot screen.png
+
+# 模拟点击游戏逻辑坐标 (lx, ly)
+python adb_ctrl.py tap 960 540
+```
